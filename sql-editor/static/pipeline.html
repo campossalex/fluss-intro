@@ -333,7 +333,7 @@
       </defs>
 
       <!-- Columns, left to right: sources · Fluss · Flink jobs · PostgreSQL · consumers -->
-      <rect class="region sources" x="8" y="20" width="182" height="310" rx="10"/>
+      <rect class="region sources" x="8" y="20" width="182" height="320" rx="10"/>
       <text class="region-label sources" x="22" y="42">DATA SOURCES</text>
       <rect class="region fluss" x="262" y="20" width="398" height="310" rx="10"/>
       <text class="region-label fluss" x="276" y="42">APACHE FLUSS · fluss.app</text>
@@ -349,9 +349,9 @@
         <line class="edge" x1="180" y1="152" x2="288" y2="152" marker-end="url(#head)"/>
         <text class="edge-label" x="234" y="144" text-anchor="middle">appends</text>
       </g>
-      <g class="job" data-edge="seed">
+      <g class="job" data-edge="routes">
         <line class="edge" x1="180" y1="272" x2="288" y2="272" marker-end="url(#head)"/>
-        <text class="edge-label" x="234" y="264" text-anchor="middle">INSERT VALUES</text>
+        <text class="edge-label" x="234" y="264" text-anchor="middle">routes-cdc</text>
       </g>
       <g class="job" data-edge="status">
         <polyline class="edge" points="440,144 462,144 462,78 482,78" marker-end="url(#head)"/>
@@ -393,11 +393,11 @@
         <text class="title" x="111" y="148" text-anchor="middle">scan-gen</text>
         <text class="sub" x="111" y="166" text-anchor="middle">Fluss Python client</text>
       </g>
-      <g class="node" data-node="carriers">
+      <g class="node" data-node="route_pg">
         <rect class="box" x="20" y="246" width="160" height="52" rx="6"/>
-        <use class="icon" href="#i-list" x="26" y="262" width="20" height="20"/>
-        <text class="title" x="111" y="268" text-anchor="middle">5 carriers</text>
-        <text class="sub" x="111" y="286" text-anchor="middle">reference data</text>
+        <use class="icon" href="#i-postgres" x="26" y="262" width="20" height="20"/>
+        <text class="title" x="111" y="268" text-anchor="middle">route_reference</text>
+        <text class="sub" x="111" y="286" text-anchor="middle">PostgreSQL table</text>
       </g>
       <g class="node" data-node="scan_events_log">
         <rect class="box" x="290" y="130" width="150" height="44" rx="6"/>
@@ -490,9 +490,9 @@
     <ol>
         <li><b>Create</b> <code>scan_events_log</code>: the generator starts writing into it, then <b>View data</b>. <span class="lab">Lab 1 · Steps 1–3</span></li>
         <li><b>Create</b> <code>shipment_status</code>, <b>Deploy</b> <code>shipment-status</code>, then <b>View data</b> on <b>Point lookup</b>. <span class="lab">Lab 2 · Steps 4–7</span></li>
-        <li><b>Create</b> <code>route_reference</code> and <b>Load</b> the carriers; <b>Create</b> <code>scans_enriched</code> and <b>Deploy</b> <code>scan-enrichment</code>. <span class="lab">Lab 3 · Steps 8–11</span></li>
+        <li><b>Create</b> the Fluss <code>route_reference</code> and the PostgreSQL CDC source, <b>Deploy</b> <code>routes-cdc</code>; <b>Create</b> <code>scans_enriched</code> and <b>Deploy</b> <code>scan-enrichment</code>. <span class="lab">Lab 3 · Steps 8–11</span></li>
         <li><b>Deploy</b> the three analytics jobs; each PostgreSQL table turns green when its first 5-minute window closes. <span class="lab">Lab 4 · Steps 12–16</span></li>
-        <li><b>Open</b> Grafana, then <b>Update SLA</b> on <code>route_reference</code> and watch it reach the dashboard. <span class="lab">Lab 5 · Steps 17–20</span></li>
+        <li><b>Open</b> Grafana, then on PostgreSQL <code>route_reference</code>: <b>Update SLA</b> and <b>Add route</b>, and watch both reach the dashboard. <span class="lab">Lab 5 · Steps 17–21</span></li>
       </ol>
       <div class="legend">
         <span><i class="inactive"></i>not created yet</span>
@@ -578,6 +578,7 @@ const WORKSHOP = [
   ["Environment home", "Every tool, its status, the connection details", 80, "/", { glyph: "home" }],
   ["Flink SQL editor", "Write and run Flink SQL; the Catalog browser", 8084, "/", { glyph: "code" }],
   ["Flink Web UI", "Running jobs, checkpoints, exceptions", 8081, "/", { mark: "flink" }],
+  ["Shipment lookup API", "GET /shipments/<id>: point lookups on shipment_status", 9051, "/", { glyph: "code" }],
   ["Grafana", "The Shipment Tracking dashboard (Lab 5)", 3000, "/d/fluss-intro-v1", { mark: "grafana" }],
 ];
 $("wmenu").innerHTML = WORKSHOP.map(([name, desc, port, path, icon]) =>
@@ -609,14 +610,15 @@ let guideOn = MODE === "guided", guideStep = null;
 
 // ── Diagram buttons ──────────────────────────────────────────────────────────
 // [x, y, width, label, action, target]. Actions: view / create (a box), deploy (an
-// arrow), seed / update (route_reference), open (a link to another UI).
+// arrow), add / update (PostgreSQL route_reference), open (a link to another UI).
 const PILLS = [
   [290, 180, 72, "Create", "create", "scan_events_log"], [368, 180, 72, "View data", "view", "scan_events_log"],
-  [290, 300, 60, "Create", "create", "route_reference"], [354, 300, 64, "View data", "view", "route_reference"],
-  [422, 300, 78, "Update SLA", "update", "route_reference"],
+  [290, 300, 72, "Create", "create", "route_reference"], [368, 300, 72, "View data", "view", "route_reference"],
+  [26, 306, 72, "Create", "create", "route_pg"],         [104, 306, 72, "View data", "view", "route_pg"],
+  [22, 218, 74, "Add route", "add", "route_pg"],          [102, 218, 76, "Update SLA", "update", "route_pg"],
   [484, 106, 64, "Create", "create", "shipment_status"], [552, 106, 70, "View data", "view", "shipment_status"],
   [484, 250, 64, "Create", "create", "scans_enriched"],  [552, 250, 70, "View data", "view", "scans_enriched"],
-  [197, 280, 74, "Load", "seed", "seed"],
+  [197, 280, 74, "Deploy", "deploy", "routes"],
   [343, 80, 74, "Deploy", "deploy", "status"],
   [527, 166, 74, "Deploy", "deploy", "enrichment"],
   [768, 254, 74, "Deploy", "deploy", "scan_window"],
@@ -625,10 +627,10 @@ const PILLS = [
   [997, 254, 90, "View data", "view", "scan_window_5m"],
   [997, 354, 90, "View data", "view", "delivery_summary"],
   [997, 454, 90, "View data", "view", "transit_time_5m"],
-  [1237, 110, 90, "View data", "view", "lookup"],
+  [1208, 110, 72, "View data", "view", "lookup"],      [1284, 110, 72, "Open API", "open", "lookup_api"],
   [1237, 354, 90, "Open", "open", "grafana"],
 ];
-const LINKS = { grafana: [3000, "/d/fluss-intro-v1"] };
+const LINKS = { grafana: [3000, "/d/fluss-intro-v1"], lookup_api: [9051, "/"] };
 const SVGNS = "http://www.w3.org/2000/svg";
 
 function drawPills() {
@@ -646,7 +648,7 @@ function drawPills() {
       const t = document.createElementNS(SVGNS, "title"); t.textContent = "View source"; p.prepend(t);
       p.setAttribute("aria-label", "View source: " + where[target]); p.classList.add("src");
     }
-    const go = () => { if (!p.classList.contains("off") || action === "view" || action === "deploy" || action === "seed") onPill(action, target); };
+    const go = () => { if (!p.classList.contains("off") || action === "view" || action === "deploy") onPill(action, target); };
     p.addEventListener("click", go);
     p.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
     g.append(p);
@@ -664,12 +666,12 @@ function setPill(p, label, cls, aria) {
 // ── Status → diagram ─────────────────────────────────────────────────────────
 const STATE_LABEL = { inactive: "not created", ready: "created", starting: "starting", live: "live",
                       idle: "not deployed", running: "running", failing: "restarting" };
-const NODE_KIND = { scan_events_log: "FLUSS LOG", shipment_status: "FLUSS PK", route_reference: "FLUSS PK",
+const NODE_KIND = { route_pg: "POSTGRES CDC", scan_events_log: "FLUSS LOG", shipment_status: "FLUSS PK", route_reference: "FLUSS PK",
                     scans_enriched: "FLUSS LOG", scan_window_5m: "POSTGRES", delivery_summary: "POSTGRES",
                     transit_time_5m: "POSTGRES", lookup: "FLINK QUERY" };
 const FLUSS_TABLES = ["scan_events_log", "shipment_status", "route_reference", "scans_enriched"];
 const PG_TABLES = ["scan_window_5m", "delivery_summary", "transit_time_5m"];
-const JOBS = ["status", "enrichment", "scan_window", "delivery", "transit"];
+const JOBS = ["status", "routes", "enrichment", "scan_window", "delivery", "transit"];
 // The analytics jobs are drawn as boxes in the Flink column: each takes its job's state.
 const JOB_BOX = { scan_window_job: "scan_window", delivery_job: "delivery", transit_job: "transit" };
 
@@ -684,19 +686,18 @@ function paint() {
     document.querySelector(`.node[data-node="${box}"]`).dataset.state =
       j.state === "running" ? "live" : j.state === "idle" ? (j.ready ? "ready" : "inactive") : "starting";
   }
-  document.querySelector('.node[data-node="carriers"]').dataset.state = status.edges.seed.loaded ? "live" : "ready";
   for (const g of document.querySelectorAll(".job[data-edge]")) {
     const st = status.edges[g.dataset.edge]?.state || "idle";
     g.dataset.state = st;
     const head = st === "running" ? "head-ok" : st === "failing" ? "head-err" : "head";
     g.querySelectorAll("[marker-end]").forEach(el => el.setAttribute("marker-end", `url(#${head})`));
   }
-  for (const n of FLUSS_TABLES) {
+  for (const n of [...FLUSS_TABLES, "route_pg"]) {
     const exists = status.nodes[n].exists;
     setPill(pill("create", n), exists ? "✓ Created" : "Create", exists ? "off" : "primary",
             exists ? `${n} is created` : `Create ${n}`);
   }
-  for (const n of [...FLUSS_TABLES, ...PG_TABLES])
+  for (const n of [...FLUSS_TABLES, ...PG_TABLES, "route_pg"])
     setPill(pill("view", n), "View data", status.nodes[n].exists ? "" : "off", `View the data of ${n}`);
   setPill(pill("view", "lookup"), "View data", status.nodes.lookup.exists ? "" : "off", "Run a point lookup on shipment_status");
   for (const e of JOBS) {
@@ -707,11 +708,8 @@ function paint() {
     else if (s.state === "starting") setPill(pill("deploy", e), "… Starting", "running");
     else setPill(pill("deploy", e), "Deploy", s.ready ? "primary" : "off", s.ready ? `Deploy ${e}` : `Deploy ${e} (create its tables first)`);
   }
-  const seed = status.edges.seed;
-  setPill(pill("seed", "seed"), seed.loaded ? "✓ Loaded" : seed.jobs.length ? "… Loading" : "Load",
-          seed.loaded ? "running" : seed.jobs.length ? "running" : seed.ready ? "primary" : "off",
-          seed.loaded ? "route_reference has its carriers" : "Load the five carriers into route_reference");
-  setPill(pill("update", "route_reference"), "Update SLA", seed.loaded ? "" : "off", "Upsert a new SLA for DHL");
+  setPill(pill("add", "route_pg"), "Add route", "", "Add a carrier to PostgreSQL route_reference");
+  setPill(pill("update", "route_pg"), "Update SLA", "", "Change DHL's SLA in PostgreSQL route_reference");
   if ($("act").open) refreshDialog();
   guideUpdate();
 }
@@ -723,7 +721,8 @@ async function poll() {
   polling = true;
   try {
     status = await api(`/api/pipeline/status/${session}`);
-    // The shipments_pg catalog the three PostgreSQL boxes need is not registered yet.
+    // The shipments_pg catalog the three PostgreSQL boxes need is not registered yet, or a
+    // running routes-cdc reads a source table this session does not have.
     // A failure is the stack's, not the session's (e.g. a missing connector JAR): it stays
     // on screen and is retried every BOOTSTRAP_RETRY, not on every poll.
     if (status.bootstrap && !bootstrapping && Date.now() >= bootstrapRetry) {
@@ -777,30 +776,31 @@ async function ensureSession() {
 // ── The pop-up ───────────────────────────────────────────────────────────────
 const ABOUT = {
   scan_gen: "A Python process using the Fluss client (pyfluss): it appends one scan event every 50–200 ms straight into scan_events_log. No Kafka, no ingestion job. Until the table exists it waits and retries.",
-  carriers: "Five carriers with their full name, hub city and SLA (average delivery days), written into route_reference by a bounded INSERT … VALUES.",
+  route_pg: "The carriers' source of truth: a PostgreSQL table (database shipments), seeded with five carriers. Creating this box registers it in Flink as route_reference_cdc, a postgres-cdc table: a snapshot, then every INSERT, UPDATE and DELETE. It lives in the session's in-memory catalog. scan-gen also reads its carrier list from here every 30 s.",
   scan_events_log: "A Fluss Log table: an ordered, append-only store of every scan, kept with no retention limit and replayable from the start. scan-gen writes it directly.",
   shipment_status: "A Fluss primary-key table: one row per shipment_id, upserted on every scan, so it always holds each shipment's latest status and location.",
-  route_reference: "A Fluss primary-key table: one row per carrier. Its key index serves the lookup join: every scan reads its carrier as of the moment it is processed.",
+  route_reference: "A Fluss primary-key table: one row per carrier, kept in sync with PostgreSQL by routes-cdc. Its key index serves the lookup join: every scan reads its carrier as of the moment it is processed.",
   scans_enriched: "A Fluss Log table of every scan with its carrier's name, hub city and SLA: the source of all three analytics jobs.",
   scan_window_5m: "Scan volume per carrier and location, one row per 5-minute window, written by Job A through the shipments_pg JDBC catalog.",
   delivery_summary: "Shipments per status and carrier, one row per 5-minute window, written by Job B.",
   transit_time_5m: "Completed deliveries per carrier with its SLA, one row per 5-minute window, written by Job C.",
-  lookup: "A Flink query using shipment_status's primary key: one live shipment's current state, then the row counts of the Log table next to the PK table.",
+  lookup: "Point lookups by shipment_id on shipment_status. View data runs one as a Flink query, then the Log vs PK row counts; Open API shows the serving pattern: a small web service (port 9051) that reads the same row straight from Fluss with its Python client, no Flink in the path.",
   grafana: "The Shipment Tracking dashboard, reading the three PostgreSQL tables.",
   gen: "scan-gen appends to scan_events_log with the Fluss Python client: the arrow lights up once the table returns rows.",
-  seed: "A bounded INSERT … VALUES: a short Flink job that upserts the five carriers into route_reference and finishes. Running it again is harmless.",
+  routes: "Snapshots PostgreSQL's route_reference through CDC, then streams every change into fluss.app.route_reference. A change in PostgreSQL becomes an upsert (or delete) of the same key in Fluss.",
   status: "Reads every scan and upserts it into shipment_status: only each shipment's latest scan survives.",
   enrichment: "A temporal lookup join: each scan looks up its carrier in route_reference as of now (FOR SYSTEM_TIME AS OF) and is written, enriched, to scans_enriched.",
   scan_window: "Job A: 5-minute TUMBLE windows over scans_enriched, counting scans per carrier and location, upserted into scan_window_5m.",
   delivery: "Job B: 5-minute TUMBLE windows, counting distinct shipments per status and carrier, upserted into delivery_summary.",
   transit: "Job C: DELIVERED scans only, per carrier and 5-minute window, with the carrier's SLA, upserted into transit_time_5m.",
-  update: "An upsert into route_reference: DHL's SLA goes from 2 days to 1. The running scan-enrichment job uses it for every scan after this point; no restart.",
+  update: "An upsert into PostgreSQL route_reference, through the shipments_pg JDBC catalog: DHL's SLA goes from 2 days to 1. routes-cdc carries it into Fluss, and the running scan-enrichment job uses it for every scan after that; no restart.",
+  add: "Adds a carrier to PostgreSQL route_reference, through the shipments_pg JDBC catalog. routes-cdc replicates it into Fluss, and scan-gen picks it up within 30 s: its shipments flow through enrichment and the analytics to Grafana.",
 };
-const EDGE_FROM = { status: ["scan_events_log"], enrichment: ["scan_events_log", "route_reference"],
+const EDGE_FROM = { routes: ["route_pg"], status: ["scan_events_log"], enrichment: ["scan_events_log", "route_reference"],
                     scan_window: ["scans_enriched"], delivery: ["scans_enriched"], transit: ["scans_enriched"] };
-const EDGE_TO = { status: "shipment_status", enrichment: "scans_enriched", scan_window: "scan_window_5m",
+const EDGE_TO = { routes: "route_reference", status: "shipment_status", enrichment: "scans_enriched", scan_window: "scan_window_5m",
                   delivery: "delivery_summary", transit: "transit_time_5m" };
-const JOB_NAME = { status: "shipment-status", enrichment: "scan-enrichment", scan_window: "scan-window-5m",
+const JOB_NAME = { routes: "routes-cdc", status: "shipment-status", enrichment: "scan-enrichment", scan_window: "scan-window-5m",
                    delivery: "delivery-summary", transit: "transit-time-5m" };
 
 let dlg = null;   // { action, target, defaultSql }
@@ -809,9 +809,9 @@ const editor = CodeMirror.fromTextArea($("actSql"), {
   extraKeys: { "Cmd-Enter": () => primary(), "Ctrl-Enter": () => primary() },
 });
 
-// Which ABOUT text explains a button: the seed and the SLA update, or the box itself.
+// Which ABOUT text explains a button: adding a route, the SLA update, or the box itself.
 function aboutKey(action, target) {
-  if (action === "update") return "update";
+  if (action === "update" || action === "add") return action;
   return target;
 }
 
@@ -830,8 +830,8 @@ function defaultSql(action, target) {
   }
   if (action === "view") return sql.nodes[target]?.view || "";
   if (action === "create") return sql.nodes[target]?.create || "";
-  if (action === "update") return sql.nodes.route_reference.update;
-  if (action === "deploy" || action === "seed") return sql.edges[target]?.sql || "";
+  if (action === "update" || action === "add") return sql.nodes.route_pg[action];
+  if (action === "deploy") return sql.edges[target]?.sql || "";
   return "";
 }
 
@@ -842,15 +842,16 @@ function openDialog(action, target) {
   editor.setValue(dlg.defaultSql);
   $("actSqlWrap").hidden = false;
   const title = action === "deploy" ? JOB_NAME[target]
-              : action === "seed" ? "route_reference · the five carriers"
-              : action === "update" ? "route_reference · DHL's SLA"
+              : action === "update" ? "PostgreSQL route_reference · DHL's SLA"
+              : action === "add" ? "PostgreSQL route_reference · a new carrier"
+              : target === "route_pg" ? "PostgreSQL · route_reference (CDC)"
               : target === "lookup" ? "Point lookup · shipment_status"
               : PG_TABLES.includes(target) ? `PostgreSQL · ${target}` : `fluss.app.${target}`;
   $("actTitle").textContent =
     (action === "view" ? "View data · " : action === "create" ? "Create · " : action === "deploy" ? "Deploy · "
-     : action === "seed" ? "Load · " : action === "update" ? "Update · " : "") + title;
-  $("actKind").textContent = action === "deploy" ? "FLINK JOB" : action === "seed" ? "INSERT VALUES"
-                           : action === "update" ? "UPSERT" : NODE_KIND[target] || "";
+     : action === "update" ? "Update · " : action === "add" ? "Add route · " : "") + title;
+  $("actKind").textContent = action === "deploy" ? "FLINK JOB" : action === "update" || action === "add" ? "JDBC UPSERT"
+                           : NODE_KIND[target] || "";
   $("actAbout").textContent = ABOUT[aboutKey(action, target)] || "";
   refreshDialog();
   if (!$("act").open) $("act").showModal();
@@ -862,8 +863,8 @@ function refreshDialog() {
   if (!dlg || !status) return;
   const { action, target } = dlg, notes = [], buttons = [];
   const node = status.nodes[target], edge = status.edges[target];
-  let st = action === "deploy" || action === "seed" ? edge?.state : action === "update" ? status.nodes.route_reference.state : node?.state;
-  $("actState").textContent = action === "seed" && edge?.loaded ? "loaded" : STATE_LABEL[st] || "";
+  let st = action === "deploy" ? edge?.state : action === "update" || action === "add" ? status.edges.routes.state : node?.state;
+  $("actState").textContent = STATE_LABEL[st] || "";
   $("actState").className = "chip " + (st === "running" ? "live" : st || "");
   const jobLink = j => `<a target="_blank" href="${location.protocol}//${host}:8081/#/job/running/${j.jid}/overview">${esc(j.name)} · ${j.jid.slice(0, 8)}</a>`;
   if (action === "view") {
@@ -876,14 +877,13 @@ function refreshDialog() {
   } else if (action === "create") {
     buttons.push(btn(node?.exists ? "✓ Already created" : "Create table", "primary", () => runSql(editor.getValue()), node?.exists));
     if (node?.exists) notes.push(["The table exists. Running the SQL again changes nothing: every statement is IF NOT EXISTS.", "ok"]);
-  } else if (action === "seed") {
-    if (!status.nodes.route_reference.exists) notes.push(["Create route_reference first.", "err"]);
-    if (edge.loaded) notes.push(["route_reference has its carriers. Running it again is harmless: each row is an upsert by carrier_code.", "ok"]);
-    buttons.push(btn("▶ Load carriers", "primary", () => runSql(editor.getValue()), !status.nodes.route_reference.exists));
-  } else if (action === "update") {
-    notes.push(["The new SLA reaches transit_time_5m with the next window that closes after this point: watch sla_days for DHL in Grafana's Carrier SLA table.", ""]);
-    if (status.edges.enrichment.state !== "running") notes.push(["scan-enrichment is not running, so nothing picks the change up yet.", ""]);
-    buttons.push(btn("▶ Run upsert", "primary", () => runSql(editor.getValue()), !status.nodes.route_reference.exists));
+  } else if (action === "update" || action === "add") {
+    notes.push([action === "update"
+      ? "The new SLA reaches transit_time_5m with the next window that closes after this point: watch sla_days for DHL in Grafana's Carrier SLA table."
+      : "scan-gen reloads its carriers every 30 s: PNL scans appear in scan_events_log and scans_enriched, then in Grafana after the next window. Change the values to add a carrier of your own.", ""]);
+    if (status.edges.routes.state !== "running") notes.push(["routes-cdc is not running, so the change stays in PostgreSQL until you deploy it.", ""]);
+    else if (status.edges.enrichment.state !== "running") notes.push(["scan-enrichment is not running, so no scan picks the change up yet.", ""]);
+    buttons.push(btn("▶ Run upsert", "primary", () => runSql(editor.getValue())));
   } else if (action === "deploy") {
     const missing = [...EDGE_FROM[target], EDGE_TO[target]].filter(n => !status.nodes[n].exists);
     if (edge.jobs.length) {
@@ -892,8 +892,8 @@ function refreshDialog() {
       buttons.push(btn(`View ${EDGE_TO[target]}`, "", () => openDialog("view", EDGE_TO[target])));
     } else {
       if (missing.length) notes.push([`Create ${missing.join(" and ")} first.`, "err"]);
-      if (target === "enrichment" && !status.edges.seed.loaded && status.nodes.route_reference.exists)
-        notes.push(["route_reference is still empty: Load the carriers first, or every scan finds no carrier and is dropped by the join.", "err"]);
+      if (target === "enrichment" && status.edges.routes.state !== "running" && status.nodes.route_reference.state !== "live")
+        notes.push(["route_reference is still empty: deploy routes-cdc first, or every scan finds no carrier and is dropped by the join.", "err"]);
       buttons.push(btn("▶ Deploy job", "primary", () => runSql(editor.getValue()), missing.length > 0));
     }
   }
@@ -1250,13 +1250,18 @@ const GUIDE = [
     what: "One row per carrier: the lookup side of the join. Its key index makes each lookup a point read.",
     look: "The box turns solid.",
     done: s => s.nodes.route_reference.exists },
-  { a: "seed", t: "seed", li: 2, lab: "Lab 3 · Step 8", title: "Load the five carriers",
-    what: "A bounded <b>INSERT … VALUES</b>: a short Flink job that writes DHL, UPS, FDX, GLS and TNT, then finishes.",
-    look: "route_reference turns green once its rows are confirmed.",
-    done: s => s.edges.seed.loaded },
+  { a: "create", t: "route_pg", li: 2, lab: "Lab 3 · Step 8", title: "Register the PostgreSQL CDC source",
+    what: "Describes PostgreSQL's <b>route_reference</b> as a <b>postgres-cdc</b> table: Flink reads a snapshot of the carriers, then every insert, update and delete from the write-ahead log.",
+    look: "The PostgreSQL box turns green.",
+    done: s => s.nodes.route_pg.exists },
+  { a: "deploy", t: "routes", li: 2, lab: "Lab 3 · Step 8", title: "Deploy routes-cdc",
+    what: "Streams the snapshot, then every change, into the Fluss route_reference. An UPDATE in PostgreSQL becomes an upsert of the same key in Fluss.",
+    look: "route_reference goes amber, then green.",
+    done: s => s.edges.routes.state === "running",
+    until: s => s.nodes.route_reference.state === "live", wait: "route_reference turns green once its rows are confirmed." },
   { a: "view", t: "route_reference", li: 2, lab: "Lab 3 · Step 9", title: "Inspect the reference table",
-    what: "A bounded read of route_reference.",
-    look: "Five rows, one per carrier." },
+    what: "A bounded read of the Fluss route_reference.",
+    look: "Five rows, one per carrier — the same as in PostgreSQL." },
   { a: "create", t: "scans_enriched", li: 2, lab: "Lab 3 · Step 10", title: "Create the Log table scans_enriched",
     what: "Every scan with its carrier's name, hub city and SLA: the source of the Lab 4 analytics.",
     look: "The box turns solid.",
@@ -1288,17 +1293,20 @@ const GUIDE = [
   { a: "open", t: "grafana", li: 4, lab: "Lab 5 · Steps 17–19", title: "Open the Grafana dashboard",
     what: "The Shipment Tracking dashboard: its datasource and panels are provisioned, nothing to import.",
     look: "The KPI row, scan volume by carrier, top locations, the carrier SLA table." },
-  { a: "update", t: "route_reference", li: 4, lab: "Lab 5 · Step 20", title: "Update DHL's SLA",
-    what: "An <b>upsert</b> into route_reference: DHL's SLA becomes 1 day. The running lookup join uses it for every scan from now on — no restart.",
+  { a: "update", t: "route_pg", li: 4, lab: "Lab 5 · Step 20", title: "Update DHL's SLA",
+    what: "An <b>upsert</b> into PostgreSQL through the shipments_pg JDBC catalog: DHL's SLA becomes 1 day. CDC carries it into Fluss, and the running lookup join uses it for every scan from now on — no restart.",
     look: "The next closed window in transit_time_5m shows sla_days = 1 for DHL." },
+  { a: "add", t: "route_pg", li: 4, lab: "Lab 5 · Step 21", title: "Add a route",
+    what: "A new carrier, PostNL, written to PostgreSQL the same way. CDC replicates it into Fluss; scan-gen reloads its carriers every 30 s and starts shipping with it.",
+    look: "PNL scans in scan_events_log within 30 s; PostNL in Grafana after the next window." },
 ];
 // What each kind of button does, for the hover explanations.
 const ACTION_TIP = {
   create: "Opens the CREATE statement. Edit it if you like, then run it.",
   view: "Opens a query of this table and shows its rows live. Closing the pop-up cancels the query.",
   deploy: "Opens the job's INSERT INTO statement; Deploy submits it as a long-running Flink job.",
-  seed: "Opens the INSERT … VALUES that loads the carriers: a bounded Flink job.",
-  update: "Opens an upsert that changes one carrier's SLA in place.",
+  update: "Opens an upsert, through the JDBC catalog, that changes one carrier's SLA in PostgreSQL.",
+  add: "Opens an insert, through the JDBC catalog, that adds a carrier to PostgreSQL.",
   open: "Opens this tool in a new tab.",
 };
 const NODE_TIP = {
@@ -1306,13 +1314,12 @@ const NODE_TIP = {
   delivery_job: ["Job B · delivery-summary", ABOUT.delivery],
   transit_job: ["Job C · transit-time-5m", ABOUT.transit],
   scan_gen: ["scan-gen", ABOUT.scan_gen],
-  carriers: ["The carriers", ABOUT.carriers],
 };
-const NODE_NAME = { scan_events_log: "fluss.app.scan_events_log", shipment_status: "fluss.app.shipment_status",
+const NODE_NAME = { route_pg: "PostgreSQL · route_reference", scan_events_log: "fluss.app.scan_events_log", shipment_status: "fluss.app.shipment_status",
   route_reference: "fluss.app.route_reference", scans_enriched: "fluss.app.scans_enriched",
   scan_window_5m: "PostgreSQL · scan_window_5m", delivery_summary: "PostgreSQL · delivery_summary",
   transit_time_5m: "PostgreSQL · transit_time_5m", lookup: "Point lookup", grafana: "Grafana", gen: "scan-gen → Fluss",
-  seed: "Load the carriers", ...JOB_NAME };
+  ...JOB_NAME };
 
 const seenKey = () => `pipeline.guide.seen.${(session || "").slice(0, 8)}`;
 function seenSet() { try { return new Set(JSON.parse(store.get(seenKey()) || "[]")); } catch { return new Set(); } }
@@ -1363,7 +1370,7 @@ function guideUpdate() {
   $("guide").hidden = false;
   guidePlace();
 }
-const pillLabel = g => ({ create: "Create", view: "View data", deploy: "Deploy", seed: "Load", update: "Update SLA", open: "Open" })[g.a];
+const pillLabel = g => ({ create: "Create", view: "View data", deploy: "Deploy", add: "Add route", update: "Update SLA", open: "Open" })[g.a];
 
 // The callout goes where it hides the least: in the free space above or below the diagram,
 // clear of the Suggested steps panel, and only next to the button itself when there is no

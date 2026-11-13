@@ -10,6 +10,8 @@ editor and a click-through Pipeline Builder.
 scan-gen (pyfluss) ─► fluss.app.scan_events_log ─► shipment-status ─► fluss.app.shipment_status (PK)
                                  │
                                  └─► scan-enrichment ◄── fluss.app.route_reference (PK, lookup join)
+                                           │                        ▲ routes-cdc (postgres-cdc)
+                                           │             PostgreSQL route_reference
                                            │
                                 fluss.app.scans_enriched
                                            │  3 jobs, TUMBLE 5 min
@@ -35,7 +37,7 @@ This page is how to deploy it. Once it is up:
 | **Docker** | Docker Engine with **Compose v2 ≥ 2.20** | `docker compose version` to check. |
 | **Tools** | `bash`, `curl`, `jq` | `start.sh` uses `curl` and `jq`. |
 | **Internet access** | On the first run | Images from Docker Hub, Python packages from PyPI (`pyfluss`). The connector JARs are committed in `lib/`. |
-| **Free ports** | 80, 3000, 5432, 8081, 8083, 8084, 9123 | Stop any other Docker Compose stack using them first. |
+| **Free ports** | 80, 3000, 5432, 8081, 8083, 8084, 9051, 9123 | Stop any other Docker Compose stack using them first. |
 
 Images exist for both x86_64 and arm64 (Apple Silicon, AWS Graviton).
 
@@ -78,7 +80,7 @@ recommended. Install Docker with the Compose plugin, clone the repository and ru
 they were opened with, so share `http://<public-ip-or-dns>`.
 
 **Nothing has authentication**: Grafana runs as anonymous admin, the Flink Web UI accepts JAR
-uploads, the SQL Gateway executes any SQL. Open ports 80, 8084, 8081 and 3000 only to the
+uploads, the SQL Gateway executes any SQL. Open ports 80, 8084, 8081, 9051 and 3000 only to the
 attendees' IP range; never open 5432, 8083 or 9123.
 
 ---
@@ -91,12 +93,13 @@ attendees' IP range; never open 5432, 8083 or 9123.
 | **Flink SQL editor** | http://localhost:8084 | — | Labs 1–5 |
 | **Pipeline Builder** | http://localhost:8084/pipeline | — | Labs 1–5 |
 | Flink Web UI | http://localhost:8081 | — | Labs 2–4 |
+| **Shipment lookup API** — `GET /shipments/<id>` | http://localhost:9051 | — | Lab 2 |
 | Grafana — *Shipment Tracking* | http://localhost:3000 | anonymous admin | Lab 5 |
 
 | Endpoint | From the host | Inside the Docker network (what the lab SQL uses) | Credentials |
 |---|---|---|---|
 | Fluss coordinator | `localhost:9123` | `coordinator-server:9123` | — |
-| PostgreSQL `shipments` | `localhost:5432` | `postgres:5432` | `root` / `admin1` |
+| PostgreSQL `shipments` | `localhost:5432` | `postgres:5432` | `root` / `admin1`; CDC: `cdc_user` / `admin1` |
 | Flink SQL Gateway (REST) | `http://localhost:8083` | `http://sql-gateway:8083` | — |
 
 ---
@@ -109,5 +112,7 @@ attendees' IP range; never open 5432, 8083 or 9123.
 | Fluss | On Kubernetes, `coordinator-server-0…:9124` | Docker, `coordinator-server:9123` |
 | Table type | `'table.type' = 'log' / 'primary-key'` | Inferred: a PRIMARY KEY makes a PK table (OSS Fluss rejects `table.type`) |
 | PostgreSQL | `host.minikube.internal:5432` | `postgres:5432` |
+| Carriers (`route_reference`) | Seeded and updated with Flink `INSERT`s into the Fluss table | A PostgreSQL table, replicated into Fluss by a `postgres-cdc` job (`routes-cdc`); added to / updated through the `shipments_pg` JDBC catalog |
+| Generator carriers | The fixed five | Re-read from PostgreSQL every 30 s, so new routes get shipments |
 | Generator | `screen` session on the VM | the `scan-gen` container |
 | Grafana | datasource and dashboard added by hand (Steps 17–18) | both provisioned |

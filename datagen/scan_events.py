@@ -5,15 +5,21 @@
 #
 # Events are written directly to the fluss.app.scan_events_log Log table.
 # The script retries until the table is available — create it in Lab 1, Step 2.
+#
+# The carriers come from PostgreSQL's route_reference, re-read every 30 s: a route added
+# there (Lab 5, Step 21) starts getting new shipments. Shipments already in flight keep
+# their carrier. If PostgreSQL cannot be read, the last known list stays in use.
 
 import asyncio
 import configparser
 import os
 import random
+import time
 import uuid
 from datetime import datetime
 
 import fluss
+import psycopg
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 config = configparser.ConfigParser()
@@ -28,7 +34,11 @@ max_freq_ms       = int(config["GENERATOR"]["max_freq_ms"])
 num_shipments     = int(config["GENERATOR"]["num_shipments"])
 max_transit_hops  = int(config["GENERATOR"]["max_transit_hops"])
 
+PG_DSN = os.environ.get("PG_DSN", "postgresql://root:admin1@postgres:5432/shipments")
+CARRIER_REFRESH_S = 30
+
 # ── Constants ─────────────────────────────────────────────────────────────────
+# Until the first read from PostgreSQL succeeds: the five carriers it is seeded with.
 CARRIERS = ["DHL", "UPS", "FDX", "GLS", "TNT"]
 
 LOCATIONS = [
@@ -59,6 +69,28 @@ def make_scan(shipment_id: str, carrier_code: str, status: str, location: str) -
         "location":     location,
         "scan_time":    datetime.now(),
     }
+
+
+# ── Carriers from PostgreSQL ──────────────────────────────────────────────────
+_carriers_read_at = 0.0
+
+
+def refresh_carriers() -> None:
+    """Re-read the carrier codes from route_reference, at most every CARRIER_REFRESH_S."""
+    global CARRIERS, _carriers_read_at
+    if time.monotonic() - _carriers_read_at < CARRIER_REFRESH_S:
+        return
+    _carriers_read_at = time.monotonic()
+    try:
+        with psycopg.connect(PG_DSN, connect_timeout=5) as pg:
+            codes = [r[0] for r in pg.execute("SELECT carrier_code FROM route_reference ORDER BY carrier_code")]
+    except Exception as e:
+        print(f"[CARRIERS] could not read route_reference ({e}); keeping {CARRIERS}", flush=True)
+        return
+    if codes and set(codes) != set(CARRIERS):
+        print(f"[CARRIERS] {sorted(CARRIERS)} -> {codes}", flush=True)
+    if codes:
+        CARRIERS = codes
 
 
 # ── Fluss helpers ─────────────────────────────────────────────────────────────
@@ -93,6 +125,8 @@ async def main() -> None:
     # active_shipments: shipment_id → {carrier_code, status_idx, location, transit_hops}
     active: dict = {}
 
+    refresh_carriers()
+
     # Seed an initial pool of shipments spread across lifecycle stages
     for _ in range(num_shipments // 2):
         sid      = new_shipment_id()
@@ -116,6 +150,8 @@ async def main() -> None:
     )
 
     while True:
+        refresh_carriers()
+
         # ── Maybe birth a new shipment ──────────────────────────────────────
         if len(active) < num_shipments and random.random() < 0.20:
             sid      = new_shipment_id()

@@ -8,8 +8,9 @@ A data generator is already running. It writes synthetic scan events **directly 
 Fluss** with the Fluss Python client — no Kafka, no ingestion job. Each event is a courier
 scanning a package at a stage of delivery: `PICKED_UP`, `IN_TRANSIT`, `OUT_FOR_DELIVERY`
 or `DELIVERED`. You will create the Log table (which starts the data flowing), keep each
-shipment's latest state in a Primary Key table, enrich every scan with carrier metadata
-through a temporal lookup join, and compute analytics that Grafana shows live.
+shipment's latest state in a Primary Key table, replicate the carriers from PostgreSQL with
+change data capture, enrich every scan with them through a temporal lookup join, and
+compute analytics that Grafana shows live.
 
 This is the open-source edition of the Ververica Platform `fluss_intro` lab. The labs and
 step numbers are the same; what changes is where you type the SQL and how a job gets
@@ -23,10 +24,13 @@ deployed.
 | **Flink SQL editor** | http://localhost:8084 | Write and run every Flink SQL statement |
 | **Pipeline Builder** | http://localhost:8084/pipeline | The same labs, clicked through the architecture diagram |
 | **Flink Web UI** | http://localhost:8081 | See, inspect and cancel the running jobs |
+| **Shipment lookup API** | http://localhost:9051 | Track a shipment: point lookups on the Fluss PK table from a web service (Lab 2) |
 | **Grafana** | http://localhost:3000 | The shipment analytics dashboard (Lab 5) |
 
 PostgreSQL (database `shipments`) is at `localhost:5432` from your machine, user `root`,
-password `admin1`. Inside the lab network — in the SQL below — it is `postgres:5432`.
+password `admin1`. Inside the lab network — in the SQL below — it is `postgres:5432`. It
+holds the carriers (`route_reference`, the source of truth for Lab 3) and the three tables
+Lab 4 writes.
 
 Your instructor started the environment with `./start.sh --services-only`: everything is
 running, and nothing has been created yet.
@@ -198,18 +202,75 @@ SET 'execution.runtime-mode' = 'streaming';
 > shipment — the current state. Both come from the same stream and answer different
 > questions. The last `SET` puts the session back in streaming mode for the next labs.
 
+### Step 7b: Serve the lookup from an API
+
+The point lookup of Step 6 ran as a Flink query. An application does not need Flink for
+that: it can ask Fluss directly. The **shipment lookup API** is a small web service that
+holds one Fluss client connection and answers each request with a primary-key lookup on
+`fluss.app.shipment_status` — the same pattern an online feature store uses to serve a model.
+
+Open **http://localhost:9051**, pick one of the live shipments, and leave *Refresh every 2 s*
+on: the status moves along `PICKED_UP` → `IN_TRANSIT` → `OUT_FOR_DELIVERY` → `DELIVERED` as
+the `shipment-status` job upserts each new scan. From a terminal:
+
+```bash
+curl -s http://localhost:9051/shipments/sample          # a few live shipment IDs
+curl -s http://localhost:9051/shipments/SHP-12345       # one shipment's current state
+```
+
+```json
+{
+  "shipment_id": "SHP-12345",
+  "found": true,
+  "shipment": { "carrier_code": "UPS", "status": "IN_TRANSIT", "location": "Munich",
+                "last_scan": "2026-11-13T15:27:03.320", "age_s": 0.8 },
+  "source": "fluss.app.shipment_status",
+  "response_time_ms": 41.2
+}
+```
+
+An unknown ID returns `404` with `"found": false`.
+
+> [!NOTE]
+> There is no copy of the data in a cache or a separate serving database: the table the
+> streaming job writes *is* the online store.
+
+**Measure it.** Click **Latency test**: the pop-up looks up one shipment over and over —
+60 seconds by default; set the duration and the concurrency yourself — and shows **p50**,
+**p90** and **p99** live (half, 90 % and 99 % of lookups were faster than that), with a
+per-second chart and a histogram. The time is measured inside the API service around each
+Fluss lookup, so your browser and the network are not in it.
+
+Run it with concurrency 1, then 8, then 32. On a laptop, with the Python client:
+
+| Concurrency | Lookups/s | p50 | p99 |
+|---|---|---|---|
+| 1 | ~10 | ~103 ms | ~107 ms |
+| 8 | ~78 | ~103 ms | ~108 ms |
+| 32 | ~314 | ~103 ms | ~113 ms |
+
+Throughput grows with the lookups in flight while each lookup's latency stays flat — and the
+p99 barely moves away from the p50. The same test from a terminal:
+
+```bash
+curl -X POST http://localhost:9051/bench -H 'Content-Type: application/json' \
+  -d '{"duration_s": 60, "concurrency": 8}'      # shipment_id optional: a live one is picked
+curl http://localhost:9051/bench                  # progress, p50 / p90 / p99
+```
+
 ---
 
 ## Lab 3: Temporal Lookup Join
 
 A **temporal lookup join** enriches a stream with a PK table's data at the moment each event
 is processed — no separate enrichment service, no cache: Fluss serves each lookup as a point
-read.
+read. The carriers' source of truth is a PostgreSQL table; **change data capture** keeps a
+Fluss PK table in sync with it.
 
-### Step 8: Create and seed the route_reference PK table
+### Step 8: Replicate route_reference from PostgreSQL
 
-Static carrier metadata, one row per carrier: full name, hub city and SLA (average delivery
-days).
+PostgreSQL already has a `route_reference` table with five carriers: full name, hub city
+and SLA (average delivery days). First create the Fluss PK table the join will read:
 
 ```sql
 CREATE TABLE IF NOT EXISTS fluss.app.route_reference (
@@ -221,18 +282,53 @@ CREATE TABLE IF NOT EXISTS fluss.app.route_reference (
 ) WITH (
   'bucket.num' = '1'
 );
-
-INSERT INTO fluss.app.route_reference VALUES
-  ('DHL', 'DHL Express',          'Frankfurt',  2),
-  ('UPS', 'UPS Worldwide',        'Cologne',    3),
-  ('FDX', 'FedEx International',  'Amsterdam',  2),
-  ('GLS', 'GLS Group',            'Bologna',    4),
-  ('TNT', 'TNT Express',          'Liège',      3);
 ```
 
-The `INSERT … VALUES` is a bounded Flink job: it writes five rows and finishes.
+Then register the PostgreSQL table as a **postgres-cdc** source: Flink reads a snapshot of
+it, then every INSERT, UPDATE and DELETE from PostgreSQL's write-ahead log (through the
+replication slot and publication the lab setup created).
+
+```sql
+CREATE TABLE IF NOT EXISTS route_reference_cdc (
+  `carrier_code`      STRING,
+  `carrier_name`      STRING,
+  `hub_city`          STRING,
+  `avg_delivery_days` INT,
+  PRIMARY KEY (`carrier_code`) NOT ENFORCED
+) WITH (
+  'connector'                 = 'postgres-cdc',
+  'hostname'                  = 'postgres',
+  'port'                      = '5432',
+  'username'                  = 'cdc_user',
+  'password'                  = 'admin1',
+  'database-name'             = 'shipments',
+  'schema-name'               = 'public',
+  'table-name'                = 'route_reference',
+  'slot.name'                 = 'flink_cdc_routes_slot',
+  'decoding.plugin.name'      = 'pgoutput',
+  'debezium.publication.name' = 'routes_pub'
+);
+```
+
+> [!NOTE]
+> Unlike the Fluss tables, `route_reference_cdc` lives in Flink's in-memory catalog
+> (`source_catalog`): it exists only in this session. If you start a **New session**, the
+> editor re-creates it for you while the job below is running.
+
+Start the replication job:
+
+```sql
+SET 'pipeline.name' = 'routes-cdc';
+
+INSERT INTO fluss.app.route_reference
+SELECT * FROM route_reference_cdc;
+
+RESET 'pipeline.name';
+```
 
 ### Step 9: Inspect the reference table
+
+The Fluss copy:
 
 ```sql
 SET 'execution.runtime-mode' = 'batch';
@@ -240,7 +336,8 @@ SELECT * FROM fluss.app.route_reference;
 SET 'execution.runtime-mode' = 'streaming';
 ```
 
-Five rows, one per carrier.
+Five rows, one per carrier — the same as in PostgreSQL. To watch the change stream itself,
+run `SELECT * FROM route_reference_cdc;` and leave it open while you do Lab 5.
 
 ### Step 10: Create the scans_enriched Log table
 
@@ -326,8 +423,8 @@ CREATE CATALOG IF NOT EXISTS shipments_pg WITH (
 );
 ```
 
-Expand `shipments_pg` in the Catalog panel: the three tables were created when PostgreSQL
-started.
+Expand `shipments_pg` in the Catalog panel: the three analytics tables, and
+`route_reference`, were created when PostgreSQL started.
 
 > [!NOTE]
 > If you opened the Pipeline Builder, `shipments_pg` already exists — the page registers it so
@@ -451,21 +548,46 @@ The dashboard shows the last 30 minutes and refreshes every 30 seconds.
 
 ### Step 20: Update a carrier SLA and watch it propagate
 
-`route_reference` supports live upserts. Change DHL's SLA from 2 days to 1:
+The carriers live in PostgreSQL, and the `shipments_pg` catalog lets you write them from
+Flink SQL. Change DHL's SLA from 2 days to 1:
 
 ```sql
-INSERT INTO fluss.app.route_reference VALUES
+INSERT INTO shipments_pg.shipments.route_reference VALUES
   ('DHL', 'DHL Express', 'Frankfurt', 1);
 ```
 
-`carrier_code = 'DHL'` already exists, so Fluss overwrites the row in place. Scans enriched
-after this point carry `avg_delivery_days = 1` for DHL, and the next closed window in
-`transit_time_5m` shows `sla_days = 1` for DHL in Grafana's Carrier SLA table — without
-restarting any Flink job.
+`carrier_code` is the primary key, so the JDBC sink **upserts** the row in PostgreSQL.
+`routes-cdc` carries the change into `fluss.app.route_reference` within seconds; scans
+enriched after that carry `avg_delivery_days = 1` for DHL, and the next closed window in
+`transit_time_5m` shows `sla_days = 1` in Grafana's Carrier SLA table — without restarting
+any Flink job. (The same change from psql:
+`UPDATE route_reference SET avg_delivery_days = 1 WHERE carrier_code = 'DHL';`)
 
-This is the core of Fluss PK tables: reference data that updates in place and is picked up
-immediately by every running lookup join.
+Check the Fluss copy:
+
+```sql
+SET 'execution.runtime-mode' = 'batch';
+SELECT * FROM fluss.app.route_reference WHERE carrier_code = 'DHL';
+SET 'execution.runtime-mode' = 'streaming';
+```
+
+### Step 21: Add a route
+
+Add a sixth carrier the same way:
+
+```sql
+INSERT INTO shipments_pg.shipments.route_reference VALUES
+  ('PNL', 'PostNL', 'Utrecht', 3);
+```
+
+CDC replicates it into Fluss, and the generator re-reads its carrier list from PostgreSQL
+every 30 seconds, so PostNL shipments start appearing: in `scan_events_log`, enriched in
+`scans_enriched`, and — after the next window closes — in the analytics tables and Grafana
+(*Carriers Tracked* goes to 6). Try a carrier of your own with any code, name, hub and SLA.
+
+This is the pattern in full: reference data owned by an operational database, replicated
+into a Fluss PK table by CDC, and picked up immediately by every running lookup join.
 
 Congrats, you made it! You built a complete real-time Fluss pipeline — from a Python generator
-writing directly to Fluss, through Log and PK tables, to enrichment via a temporal lookup join,
-and live analytics in Grafana.
+writing directly to Fluss, through Log and PK tables and CDC from PostgreSQL, to enrichment via
+a temporal lookup join, and live analytics in Grafana.

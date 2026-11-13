@@ -46,10 +46,24 @@ SET 'execution.runtime-mode' = 'streaming';
 
 
 -- ------------------------------------- Lab 3, Step 9: the reference table
--- Five rows, one per carrier.
+-- Five rows, one per carrier, replicated from PostgreSQL by routes-cdc.
 SET 'execution.runtime-mode' = 'batch';
 SELECT * FROM fluss.app.route_reference;
 SET 'execution.runtime-mode' = 'streaming';
+
+
+-- ------------------------------------- Lab 3, Step 9: the routes in PostgreSQL
+-- The source of truth, read through the shipments_pg JDBC catalog. Needs Step 12's
+-- catalog (the Pipeline Builder registers it for you).
+SET 'execution.runtime-mode' = 'batch';
+SELECT * FROM shipments_pg.shipments.route_reference ORDER BY carrier_code;
+SET 'execution.runtime-mode' = 'streaming';
+
+
+-- ------------------------------------- Lab 3, Step 9: the CDC changelog
+-- The raw change stream Flink reads from PostgreSQL: the snapshot first, then a row for
+-- every change. Leave it open while you run Lab 5's Step 20 or 21.
+SELECT * FROM route_reference_cdc;
 
 
 -- ------------------------------------- Lab 3, Step 11: enriched scans
@@ -76,8 +90,18 @@ SET 'execution.runtime-mode' = 'streaming';
 
 
 -- ------------------------------------- Lab 5, Step 20: update a carrier SLA
--- An upsert: carrier_code DHL already exists, so Fluss overwrites the row in place.
--- The running scan-enrichment job picks it up for every scan after this point, and the
--- next closed window in transit_time_5m shows sla_days = 1 for DHL — no restart.
-INSERT INTO fluss.app.route_reference VALUES
+-- Written to PostgreSQL through the shipments_pg JDBC catalog: carrier_code is the
+-- primary key, so the JDBC sink upserts (INSERT … ON CONFLICT DO UPDATE). routes-cdc
+-- carries the change into fluss.app.route_reference within seconds, the running
+-- scan-enrichment job uses it for every scan after that, and the next closed window in
+-- transit_time_5m shows sla_days = 1 for DHL — no restart anywhere.
+INSERT INTO shipments_pg.shipments.route_reference VALUES
   ('DHL', 'DHL Express', 'Frankfurt', 1);
+
+
+-- ------------------------------------- Lab 5, Step 21: add a route
+-- A new carrier. CDC replicates it into Fluss; scan-gen reloads its carrier list from
+-- PostgreSQL every 30 s, so PostNL shipments start appearing in scan_events_log,
+-- scans_enriched and, after the next window, in Grafana.
+INSERT INTO shipments_pg.shipments.route_reference VALUES
+  ('PNL', 'PostNL', 'Utrecht', 3);

@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS fluss.app.shipment_status (
 
 -- --------------------------------------- Step 8: route_reference (PK table)
 -- Carrier metadata, one row per carrier: the lookup side of Lab 3's temporal join.
--- seed/route_reference.sql loads its five rows.
+-- A replica of PostgreSQL's route_reference, kept in sync by the routes-cdc job.
 CREATE TABLE IF NOT EXISTS fluss.app.route_reference (
   `carrier_code`      STRING,
   `carrier_name`      STRING,

@@ -1,15 +1,17 @@
 """Web SQL editor and Pipeline Builder for the Fluss Intro lab.
 
 A thin proxy in front of the Flink SQL Gateway: the browser cannot call the gateway
-directly (it sends no CORS headers). Every table of the lab lives in Fluss or PostgreSQL,
-and the `fluss` and `shipments_pg` catalog registrations are kept by the shared
-CatalogStore, so a new gateway session sees everything created so far.
+directly (it sends no CORS headers). The Fluss and PostgreSQL tables, and the `fluss` and
+`shipments_pg` catalog registrations (kept by the shared CatalogStore), are there for every
+session. The one exception is the postgres-cdc source table in flink_sql/ddl/03_sources.sql:
+it lives in the session's in-memory catalog, so a new session gets it re-created while the
+routes-cdc job that reads it is running.
 
   - optionally (PRELOAD_DDL=true) runs flink_sql/ddl/*.sql into each new session first,
     like `sql-client.sh -i`. Off by default: in the lab attendees issue the DDL
     themselves. Every statement in those files is IF NOT EXISTS.
   - builds the examples menu from flink_sql/: the DDL files, the explore.sql sections,
-    the seed and the job files.
+    and the job files.
 
 This lab has no secrets, so there is no placeholder substitution and nothing to redact:
 statements reach the gateway verbatim.
@@ -28,8 +30,8 @@ GATEWAY = os.environ.get("GATEWAY_URL", "http://sql-gateway:8083").rstrip("/")
 SQL_DIR = os.environ.get("SQL_DIR", "/opt/sql")
 PRELOAD_DDL = os.environ.get("PRELOAD_DDL", "false").lower() in ("1", "true", "yes")
 FLINK = os.environ.get("FLINK_URL", "http://jobmanager:8081").rstrip("/")
-# Flink's built-in, in-memory catalog (table.builtin-catalog-name; Flink's default name).
-BUILTIN_CATALOG = os.environ.get("BUILTIN_CATALOG", "default_catalog")
+# Flink's built-in, in-memory catalog: table.builtin-catalog-name in docker-compose.yml.
+BUILTIN_CATALOG = os.environ.get("BUILTIN_CATALOG", "source_catalog")
 
 app = Flask(__name__, static_folder="static")
 
@@ -131,8 +133,11 @@ MENU = [
     ]),
     ("Lab 3 · Temporal lookup join", [
         ("Step 8 · route_reference (PK table)", ("ddl", "01_fluss.sql", "Step 8:")),
-        ("Step 8 · seed the five carriers", ("file", "seed/route_reference.sql")),
-        ("Step 9 · the reference table", ("explore", "Lab 3, Step 9:")),
+        ("Step 8 · the postgres-cdc source table", ("ddl", "03_sources.sql", "Step 8:")),
+        ("Step 8 · job: routes-cdc", ("job", "25_routes_cdc.sql")),
+        ("Step 9 · the reference table in Fluss", ("explore", "Lab 3, Step 9: the reference")),
+        ("Step 9 · the routes in PostgreSQL", ("explore", "Lab 3, Step 9: the routes")),
+        ("Step 9 · the CDC changelog", ("explore", "Lab 3, Step 9: the CDC")),
         ("Step 10 · scans_enriched (Log table)", ("ddl", "01_fluss.sql", "Step 10:")),
         ("Step 11 · job: scan-enrichment", ("job", "30_enrichment.sql")),
         ("Step 11 · enriched scans", ("explore", "Lab 3, Step 11:")),
@@ -147,6 +152,7 @@ MENU = [
     ]),
     ("Lab 5 · Grafana", [
         ("Step 20 · update a carrier SLA", ("explore", "Lab 5, Step 20:")),
+        ("Step 21 · add a route", ("explore", "Lab 5, Step 21:")),
     ]),
 ]
 
@@ -313,7 +319,14 @@ def open_session():
                 execute_and_wait(session, stmt)
     except (GatewayError, requests.RequestException) as e:
         return json_error(f"could not open a session with the DDL loaded:\n{e}")
-    return jsonify({"session": session, "ddl": len(DDL) if load_ddl else 0, "sources": []})
+    # A pipeline already running (full ./start.sh): its source table, so it can be queried.
+    restored = []
+    if not load_ddl:
+        try:
+            restored = restore_sources(session)
+        except (GatewayError, requests.RequestException):
+            pass
+    return jsonify({"session": session, "ddl": len(DDL) if load_ddl else 0, "sources": restored})
 
 
 @app.post("/api/split")
@@ -476,11 +489,12 @@ def catalog(session):
 # Box -> its table, and the arrow (job) that feeds it. `listed` is the name SHOW TABLES
 # prints when it differs from the table's own (the JDBC catalog qualifies the schema).
 # `probe`: confirm rows whenever the table exists, not only while its feeding job runs —
-# scan_events_log is written by the scan-gen container, route_reference by a bounded seed.
+# scan_events_log is written by the scan-gen container, not by a Flink job.
 PG = ("shipments_pg", "shipments")
 NODES = {
     "scan_events_log":  {"table": ("fluss", "app", "scan_events_log"), "probe": True},
-    "route_reference":  {"table": ("fluss", "app", "route_reference"), "probe": True},
+    "route_pg":         {"table": (BUILTIN_CATALOG, "default_database", "route_reference_cdc"), "source": True},
+    "route_reference":  {"table": ("fluss", "app", "route_reference"), "feed": "routes"},
     "shipment_status":  {"table": ("fluss", "app", "shipment_status"), "feed": "status"},
     "scans_enriched":   {"table": ("fluss", "app", "scans_enriched"), "feed": "enrichment"},
     "scan_window_5m":   {"table": PG + ("scan_window_5m",), "listed": "public.scan_window_5m",
@@ -496,13 +510,19 @@ EDGES = {
     "scan_window":      {"from": ["scans_enriched"], "to": "scan_window_5m", "file": "jobs/40_scan_window_5m.sql"},
     "delivery":         {"from": ["scans_enriched"], "to": "delivery_summary", "file": "jobs/41_delivery_summary.sql"},
     "transit":          {"from": ["scans_enriched"], "to": "transit_time_5m", "file": "jobs/42_transit_time_5m.sql"},
-    # A bounded INSERT ... VALUES: its job finishes in seconds, so its arrow is lit by
-    # route_reference having rows, not by a running job.
-    "seed":             {"from": ["route_reference"], "to": "route_reference", "file": "seed/route_reference.sql", "bounded": True},
+    "routes":           {"from": ["route_pg"], "to": "route_reference", "file": "jobs/25_routes_cdc.sql"},
 }
 # Pre-registered on page load: the three PostgreSQL tables already exist (pg_shipments_ddl.sql),
 # so Flink only needs the shipments_pg catalog to see them.
 BOOTSTRAP_FILES = ["ddl/02_postgres.sql"]
+
+# ...and the CDC source table, but only while the job reading it runs. A full ./start.sh
+# submits routes-cdc through submit.sh, whose SQL Client sessions are the only ones that
+# ever had route_reference_cdc: it lives in the in-memory catalog. So a browser session
+# gets it too — the same IF NOT EXISTS DDL — once routes-cdc is running.
+SOURCES = {   # box -> (its DDL section, the arrow whose job reads it)
+    "route_pg": (("ddl/03_sources.sql", "Step 8:"), "routes"),
+}
 
 
 def read_sql(rel):
@@ -545,8 +565,12 @@ def pipeline_sql():
             "shipment_status": {"create": catalog + "\n" + database + "\n" + section("ddl/01_fluss.sql", "Step 4:"),
                                 "view": view("fluss.app.shipment_status", "One row per shipment: a streaming read of a PK table is a changelog, so rows are updated in place as shipments move on.")},
             "route_reference": {"create": catalog + "\n" + database + "\n" + section("ddl/01_fluss.sql", "Step 8:"),
-                                "view": "-- Lab 3, Step 9: five rows, one per carrier.\n" + ex("Lab 3, Step 9:"),
-                                "update": "-- Lab 5, Step 20\n" + ex("Lab 5, Step 20:")},
+                                "view": "-- Lab 3, Step 9: one row per carrier, replicated from PostgreSQL by routes-cdc.\n" + ex("Lab 3, Step 9: the reference")},
+            "route_pg": {"create": section("ddl/03_sources.sql", "Step 8:"),
+                         "view": "-- Lab 3, Step 9: route_reference read through CDC: the snapshot, then a row for every change. A streaming read: it keeps going until you cancel or close.\n" + ex("Lab 3, Step 9: the CDC"),
+                         "pg": "-- Lab 3, Step 9\n" + ex("Lab 3, Step 9: the routes"),
+                         "update": "-- Lab 5, Step 20\n" + ex("Lab 5, Step 20:"),
+                         "add": "-- Lab 5, Step 21\n" + ex("Lab 5, Step 21:")},
             "scans_enriched": {"create": catalog + "\n" + database + "\n" + section("ddl/01_fluss.sql", "Step 10:"),
                                "view": view("fluss.app.scans_enriched", "Lab 3, Step 11: every scan, with carrier_name, hub_city and avg_delivery_days from route_reference.")},
             "lookup": {"view": "-- Lab 2, Steps 6-7: a point lookup on the PK table, then Log vs PK row counts.\n"
@@ -565,14 +589,16 @@ def pipeline_sql():
 
 @app.post("/api/pipeline/bootstrap/<session>")
 def pipeline_bootstrap(session):
-    """Register what the pre-created boxes need: the shipments_pg catalog. IF NOT EXISTS."""
+    """Register what the pre-created boxes need (the shipments_pg catalog), and the source
+    a running pipeline already reads. IF NOT EXISTS throughout."""
     try:
         for rel in BOOTSTRAP_FILES:
             for stmt in split_statements(read_sql(rel)):
                 execute_and_wait(session, stmt)
+        restored = restore_sources(session)
     except (GatewayError, requests.RequestException, OSError) as e:
         return json_error(e)
-    return jsonify({"ok": True, "sources": []})
+    return jsonify({"ok": True, "sources": restored})
 
 
 # Which table a job writes, from its plan. Matching jobs to arrows by what they write, not
@@ -607,6 +633,21 @@ def active_jobs():
 
 def edge_jobs(active, edge):
     return [j for j in active if writes(j["sinks"], NODES[EDGES[edge]["to"]]["table"])]
+
+
+def restore_sources(session):
+    """Create in this session the source tables whose reading job runs (see SOURCES).
+    Returns the boxes it created. Qualified, so a USE in the session does not misplace them."""
+    running = {e for e in EDGES if any(j["state"] == "RUNNING" for j in edge_jobs(active_jobs(), e))}
+    listed = names(session, f"SHOW TABLES IN {ident(BUILTIN_CATALOG, 'default_database')}")
+    restored = []
+    for node, ((rel, prefix), edge) in SOURCES.items():
+        if edge in running and NODES[node]["table"][2] not in listed:
+            for stmt in split_statements(section(rel, prefix)):
+                execute_and_wait(session, stmt.replace(
+                    "CREATE TABLE IF NOT EXISTS ", f"CREATE TABLE IF NOT EXISTS {ident(BUILTIN_CATALOG, 'default_database')}.", 1))
+            restored.append(node)
+    return restored
 
 
 def names(session, sql):
@@ -701,6 +742,7 @@ def pipeline_status(session):
     try:
         catalogs = names(session, "SHOW CATALOGS")
         listed = {
+            BUILTIN_CATALOG: names(session, f"SHOW TABLES IN {ident(BUILTIN_CATALOG, 'default_database')}"),
             "fluss": names(session, "SHOW TABLES IN `fluss`.`app`") if "fluss" in catalogs else set(),
             "shipments_pg": names(session, "SHOW TABLES IN `shipments_pg`.`shipments`") if "shipments_pg" in catalogs else set(),
         }
@@ -733,15 +775,12 @@ def pipeline_status(session):
         elif feed == "running" or spec.get("probe"):
             want_probe(n)
             state = "live" if n in probe_ok else "starting" if feed == "running" or n == "scan_events_log" else "ready"
+        elif spec.get("source"):
+            state = "live"           # PostgreSQL's route_reference: always there to read
         else:
             state = "ready"
         nodes[n] = {"state": state, "exists": exists[n]}
 
-    # The seed: done once route_reference returns rows; its own job is gone by then.
-    loaded = nodes["route_reference"]["state"] == "live"
-    edges["seed"]["loaded"] = loaded
-    if loaded:
-        edges["seed"]["state"] = "running"
     # scan-gen: not a Flink job, the Fluss Python client appending to scan_events_log.
     edges["gen"] = {"state": "running" if nodes["scan_events_log"]["state"] == "live" else "idle", "jobs": []}
     nodes["scan_gen"] = {"state": "live"}
@@ -753,6 +792,7 @@ def pipeline_status(session):
     pg_live = [nodes[n]["state"] == "live" for n in ("scan_window_5m", "delivery_summary", "transit_time_5m")]
     nodes["grafana"] = {"state": "live" if any(pg_live) else "ready"}
     missing = [n for n, spec in NODES.items() if spec.get("precreated") and not exists[n]]
+    missing += [n for n, (_, e) in SOURCES.items() if not exists[n] and edges[e]["state"] == "running"]
     return jsonify({"nodes": nodes, "edges": edges, "bootstrap": bool(missing)})
 
 

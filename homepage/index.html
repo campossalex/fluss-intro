@@ -190,7 +190,7 @@
     <figure class="arch">
       <div class="scroll">
       <svg viewBox="0 0 1390 480" role="img"
-           aria-label="Architecture in five columns: scan-gen appends to the Fluss Log table scan_events_log; shipment-status upserts it into the PK table shipment_status; scan-enrichment joins it with the PK table route_reference into scans_enriched; three Flink analytics jobs write 5-minute windows to PostgreSQL, which Grafana reads">
+           aria-label="Architecture in five columns: PostgreSQL route_reference feeds the Fluss PK table route_reference through the routes-cdc job; scan-gen appends to the Fluss Log table scan_events_log; shipment-status upserts it into the PK table shipment_status; scan-enrichment joins it with route_reference into scans_enriched; three Flink analytics jobs write 5-minute windows to PostgreSQL, which Grafana reads">
       <defs>
         <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
         <marker id="head-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-ok" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -205,7 +205,7 @@
       </defs>
 
       <!-- Columns, left to right: sources · Fluss · Flink jobs · PostgreSQL · consumers -->
-      <rect class="region sources" x="8" y="20" width="182" height="310" rx="10"/>
+      <rect class="region sources" x="8" y="20" width="182" height="320" rx="10"/>
       <text class="region-label sources" x="22" y="42">DATA SOURCES</text>
       <rect class="region fluss" x="262" y="20" width="398" height="310" rx="10"/>
       <text class="region-label fluss" x="276" y="42">APACHE FLUSS · fluss.app</text>
@@ -221,9 +221,9 @@
         <line class="edge" x1="180" y1="152" x2="288" y2="152" marker-end="url(#head)"/>
         <text class="edge-label" x="234" y="144" text-anchor="middle">appends</text>
       </g>
-      <g class="job" data-edge="seed">
+      <g class="job" data-edge="routes">
         <line class="edge" x1="180" y1="272" x2="288" y2="272" marker-end="url(#head)"/>
-        <text class="edge-label" x="234" y="264" text-anchor="middle">INSERT VALUES</text>
+        <text class="edge-label" x="234" y="264" text-anchor="middle">routes-cdc</text>
       </g>
       <g class="job" data-edge="status">
         <polyline class="edge" points="440,144 462,144 462,78 482,78" marker-end="url(#head)"/>
@@ -265,11 +265,11 @@
         <text class="title" x="111" y="148" text-anchor="middle">scan-gen</text>
         <text class="sub" x="111" y="166" text-anchor="middle">Fluss Python client</text>
       </g>
-      <g class="node" data-node="carriers">
+      <g class="node" data-node="route_pg">
         <rect class="box" x="20" y="246" width="160" height="52" rx="6"/>
-        <use class="icon" href="#i-list" x="26" y="262" width="20" height="20"/>
-        <text class="title" x="111" y="268" text-anchor="middle">5 carriers</text>
-        <text class="sub" x="111" y="286" text-anchor="middle">reference data</text>
+        <use class="icon" href="#i-postgres" x="26" y="262" width="20" height="20"/>
+        <text class="title" x="111" y="268" text-anchor="middle">route_reference</text>
+        <text class="sub" x="111" y="286" text-anchor="middle">PostgreSQL table</text>
       </g>
       <g class="node" data-node="scan_events_log">
         <rect class="box" x="290" y="130" width="150" height="44" rx="6"/>
@@ -349,6 +349,10 @@
         <rect class="hit" x="290" y="130" width="150" height="44" rx="6"/>
         <g class="badge"><circle cx="440" cy="130" r="8"/><text x="440" y="133.5" text-anchor="middle">i</text></g>
       </g>
+      <g class="tbl" data-table="route_pg" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of PostgreSQL table route_reference">
+        <rect class="hit" x="20" y="246" width="160" height="52" rx="6"/>
+        <g class="badge"><circle cx="180" cy="246" r="8"/><text x="180" y="249.5" text-anchor="middle">i</text></g>
+      </g>
       <g class="tbl" data-table="route_reference" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of Fluss table route_reference">
         <rect class="hit" x="290" y="250" width="150" height="44" rx="6"/>
         <g class="badge"><circle cx="440" cy="250" r="8"/><text x="440" y="253.5" text-anchor="middle">i</text></g>
@@ -377,9 +381,10 @@
       </div>
       <figcaption>
         Read it left to right. <b>scan-gen</b> is not a Flink job: it writes into Fluss with the Fluss
-        Python client, so the data starts flowing the moment <code>scan_events_log</code> exists. Arrows
-        named after a job (<code>shipment-status</code>, <code>scan-enrichment</code>) are the Flink jobs
-        you deploy; the <b>Apache Flink</b> column holds the three analytics jobs, each writing 5-minute
+        Python client, so the data starts flowing the moment <code>scan_events_log</code> exists. The
+        carriers live in <b>PostgreSQL</b> and reach Fluss through change data capture. Arrows named after
+        a job (<code>routes-cdc</code>, <code>shipment-status</code>, <code>scan-enrichment</code>) are the
+        Flink jobs you deploy; the <b>Apache Flink</b> column holds the three analytics jobs, each writing 5-minute
         windows to <b>PostgreSQL</b> through the <code>shipments_pg</code> JDBC catalog, which Grafana reads.
         The <b>point lookup</b> reads <code>shipment_status</code> by its primary key.
         Click a table's ⓘ for its columns and how it is used — or build it all from the diagram in the
@@ -411,6 +416,11 @@
         <p>See, inspect and cancel the running jobs, their checkpoints and exceptions.</p>
         <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
       </div>
+      <div class="card" data-port="9051">
+        <div class="top"><a data-port="9051" data-path="/" href="#">Shipment lookup API</a><span class="lab">Lab 2</span></div>
+        <p>Track a shipment: <code>GET /shipments/&lt;id&gt;</code> reads its current state from the Fluss PK table by key — no Flink in the path.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
     </div>
   </section>
 
@@ -433,6 +443,7 @@
         <tbody>
           <tr><td>Fluss coordinator</td><td><code class="host" data-port="9123"></code></td><td><code>coordinator-server:9123</code></td><td>—</td></tr>
           <tr><td>PostgreSQL <code>shipments</code></td><td><code class="host" data-port="5432"></code></td><td><code>postgres:5432</code></td><td><code>root</code> / <code>admin1</code></td></tr>
+          <tr><td>Shipment lookup API</td><td><code class="host" data-port="9051" data-suffix="/shipments/&lt;id&gt;"></code></td><td><code>http://lookup-api:9051</code></td><td>—</td></tr>
           <tr><td>Flink SQL Gateway (REST)</td><td><code class="host" data-port="8083"></code></td><td><code>http://sql-gateway:8083</code></td><td>—</td></tr>
         </tbody>
       </table>
@@ -530,18 +541,32 @@ const TABLES = {
     ],
     query: "SELECT COUNT(*) AS active_shipments FROM fluss.app.shipment_status;",
   },
+  route_pg: {
+    name: "public.route_reference", kind: "PostgreSQL table · shipments · the CDC source",
+    about: "The carriers' source of truth, seeded with five. Change it and the change flows to Fluss through postgres-cdc; add a carrier and scan-gen starts shipping with it within 30 s.",
+    cols: [["carrier_code", "VARCHAR(10)", "", true], ["carrier_name", "VARCHAR(50)", ""], ["hub_city", "VARCHAR(50)", ""],
+           ["avg_delivery_days", "INT", "the carrier's SLA"]],
+    facts: [
+      ["CDC setup", "<code>wal_level=logical</code>, user <code>cdc_user</code>, slot <code>flink_cdc_routes_slot</code>, publication <code>routes_pub</code>, <code>REPLICA IDENTITY FULL</code>"],
+      ["Flink table", "<code>route_reference_cdc</code> (<code>postgres-cdc</code> connector), in the session's in-memory <code>source_catalog</code>"],
+      ["Written by", "you: <code>INSERT INTO shipments_pg.shipments.route_reference</code> (an upsert, through the JDBC catalog) or psql"],
+      ["Read by", "<code>routes-cdc</code>; scan-gen, for its carrier list"],
+      ["Lab step", "Lab 3, Step 8 · changed in Lab 5, Steps 20–21"],
+    ],
+    query: "INSERT INTO shipments_pg.shipments.route_reference VALUES\n  ('PNL', 'PostNL', 'Utrecht', 3);   -- in the Flink SQL editor: a new route",
+  },
   route_reference: {
     name: "fluss.app.route_reference", kind: "Fluss Primary Key table · upserts · 1 bucket",
-    about: "Carrier reference data, one row per carrier. Its primary key makes it the lookup side of a temporal join: each scan reads its carrier at the moment it is processed.",
+    about: "Carrier reference data, one row per carrier, replicated from PostgreSQL. Its primary key makes it the lookup side of a temporal join: each scan reads its carrier at the moment it is processed.",
     cols: [["carrier_code", "STRING", "", true], ["carrier_name", "STRING", ""], ["hub_city", "STRING", ""],
            ["avg_delivery_days", "INT", "the carrier's SLA"]],
     facts: [
-      ["Written by", "the Step 8 <code>INSERT … VALUES</code>, and the Step 20 upsert of DHL's SLA"],
+      ["Written by", "<code>routes-cdc</code> — inserts, updates and deletes from PostgreSQL, applied by primary key"],
       ["Read by", "<code>scan-enrichment</code>, as <code>FOR SYSTEM_TIME AS OF proc_time</code>"],
-      ["Rows", "5"],
-      ["Lab step", "Lab 3, Step 8 · updated in Lab 5, Step 20"],
+      ["Rows", "5, plus every carrier you add in PostgreSQL"],
+      ["Lab step", "Lab 3, Step 8"],
     ],
-    query: "INSERT INTO fluss.app.route_reference VALUES\n  ('DHL', 'DHL Express', 'Frankfurt', 1);   -- an upsert: the running join picks it up",
+    query: "SET 'execution.runtime-mode' = 'batch';\nSELECT * FROM fluss.app.route_reference;",
   },
   scans_enriched: {
     name: "fluss.app.scans_enriched", kind: "Fluss Log table · append-only",

@@ -64,7 +64,7 @@ print_manual_steps() {
   2. Submit the jobs — from the editor, or from a terminal:
 
        docker compose exec sql-client /opt/submit.sh status            # Lab 2
-       docker compose exec sql-client /opt/submit.sh seed enrich       # Lab 3
+       docker compose exec sql-client /opt/submit.sh routes enrich     # Lab 3
        docker compose exec sql-client /opt/submit.sh scan-window delivery-summary transit-time   # Lab 4
 
   3. Lab 5 — Grafana: http://localhost:3000 (datasource and dashboard provisioned)
@@ -76,6 +76,14 @@ print_manual_steps() {
 
   The generator's output:
        docker compose logs -f scan-gen
+
+  Change a route in PostgreSQL and watch CDC carry it to Fluss:
+       docker compose exec postgres psql -U root -d shipments -c \
+         "UPDATE route_reference SET avg_delivery_days = 1 WHERE carrier_code = 'DHL';"
+
+  A shipment's current state, straight from the Fluss PK table:
+       curl -s http://localhost:9051/shipments/sample
+       curl -s http://localhost:9051/shipments/SHP-12345
 
   What the analytics jobs have written:
        docker compose exec postgres psql -U root -d shipments -c \
@@ -130,6 +138,7 @@ wait_healthy coordinator-server 36
 wait_healthy tablet-server 36
 wait_healthy jobmanager 24
 wait_healthy sql-gateway 24
+wait_healthy lookup-api 36
 
 echo -n "    sql-editor "
 attempt=0
@@ -154,6 +163,7 @@ if [ "$SERVICES_ONLY" = "1" ]; then
   Flink SQL editor    →  http://localhost:8084   start here
   Pipeline Builder    →  http://localhost:8084/pipeline
   Flink Web UI        →  http://localhost:8081   (no jobs yet)
+  Shipment lookup API →  http://localhost:9051   (answers after Lab 2, Step 4)
   Grafana             →  http://localhost:3000   (empty until Lab 4)
 
   Fluss (from host):       localhost:9123
@@ -195,6 +205,7 @@ cat <<'BANNER'
   Flink SQL editor    →  http://localhost:8084
   Pipeline Builder    →  http://localhost:8084/pipeline
   Flink Web UI        →  http://localhost:8081
+  Shipment lookup API →  http://localhost:9051
   Grafana             →  http://localhost:3000   first 5-minute window in ≤ 5 minutes
 
   Fluss (from host):       localhost:9123

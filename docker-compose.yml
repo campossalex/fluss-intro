@@ -7,6 +7,8 @@ name: fluss-intro
 #   scan-gen (pyfluss) ─► fluss.app.scan_events_log ─► shipment-status ─► fluss.app.shipment_status
 #                                    │
 #                                    └─► scan-enrichment ◄─ fluss.app.route_reference (lookup join)
+#                                              │                    ▲ routes-cdc (postgres-cdc)
+#                                              │          PostgreSQL route_reference
 #                                              │
 #                                   fluss.app.scans_enriched
 #                                              │  3 windowed jobs (TUMBLE 5 min)
@@ -22,7 +24,8 @@ name: fluss-intro
 #   8083  — Flink SQL Gateway (REST)
 #   8084  — Web SQL editor + Pipeline Builder (Flink SQL in the browser)
 #   9123  — Fluss coordinator
-#   5432  — PostgreSQL `shipments` (the three Lab 4 sink tables)
+#   9051  — Shipment lookup API + UI (point lookups on fluss.app.shipment_status)
+#   5432  — PostgreSQL `shipments` (route_reference, the CDC source; the three Lab 4 sinks)
 #   3000  — Grafana
 
 x-flink-image: &flink-image apache/flink:1.20-java17
@@ -57,6 +60,10 @@ x-flink-client-conf: &flink-client-conf |
   table.local-time-zone: UTC
   table.catalog-store.kind: file
   table.catalog-store.file.path: /opt/flink/catalog-store
+  # The built-in, in-memory catalog every session starts with ("default_catalog" by
+  # default). It holds only the postgres-cdc source table, which a new session must
+  # create again — the name says what it is for.
+  table.builtin-catalog-name: source_catalog
   execution.checkpointing.interval: 30s
   state.backend.type: hashmap
   state.checkpoints.dir: file:///tmp/flink-checkpoints
@@ -158,7 +165,7 @@ services:
     networks:
       - fluss-net
 
-  # ── PostgreSQL: the analytics sink of Lab 4 ──────────────────────────────────
+  # ── PostgreSQL: route_reference (the CDC source of Lab 3) and the Lab 4 sinks ──
 
   postgres:
     image: postgres:15
@@ -168,6 +175,18 @@ services:
       POSTGRES_PASSWORD: admin1
       POSTGRES_DB: shipments
       TZ: UTC
+    # wal_level=logical is what the postgres-cdc connector needs (route_reference, Lab 3).
+    # It is a postmaster setting, so it goes on the command line; the init script runs
+    # under a temporary server started with these same arguments, which is why it can
+    # create the logical replication slot.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=5
+      - -c
+      - max_wal_senders=5
     ports:
       - "5432:5432"
     volumes:
@@ -408,8 +427,13 @@ services:
       TZ: UTC
       PYTHONUNBUFFERED: "1"
       FLUSS_BOOTSTRAP_SERVERS: coordinator-server:9123
+      # Where it reads the carrier list from, every 30 s: a route added in PostgreSQL
+      # starts getting shipments.
+      PG_DSN: postgresql://root:admin1@postgres:5432/shipments
     depends_on:
       tablet-server:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     volumes:
       - ./datagen:/app:ro
@@ -418,6 +442,37 @@ services:
       bash -c "pip install -r requirements.txt -q --root-user-action=ignore && python3 scan_events.py"
     networks:
       - fluss-net
+    restart: on-failure
+
+  # ── Shipment lookup API ──────────────────────────────────────────────────────
+  # GET /shipments/<id>: a point lookup by primary key on fluss.app.shipment_status with
+  # the Fluss Python client — the online-serving side of Lab 2. It opens its Fluss
+  # connection and the table on demand, so it starts before Lab 2 creates the table.
+  lookup-api:
+    image: python:3.11-slim
+    hostname: lookup-api
+    environment:
+      TZ: UTC
+      PYTHONUNBUFFERED: "1"
+      FLUSS_BOOTSTRAP_SERVERS: coordinator-server:9123
+    depends_on:
+      tablet-server:
+        condition: service_healthy
+    volumes:
+      - ./lookup-api:/app:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install -r requirements.txt -q --root-user-action=ignore && python3 app.py"
+    ports:
+      - "9051:9051"
+    networks:
+      - fluss-net
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9051/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 30
+      start_period: 30s
     restart: on-failure
 
   # ── Grafana ──────────────────────────────────────────────────────────────────

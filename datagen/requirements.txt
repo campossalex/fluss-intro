@@ -1,2 +1,3 @@
 pyfluss==1.0.0
 pyarrow
+psycopg[binary]==3.2.*

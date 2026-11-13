@@ -50,6 +50,10 @@ download "fluss-flink-${FLINK_VERSION}-${FLUSS_VERSION}.jar" \
 # CREATE CATALOG ... 'type' = 'jdbc' fails with
 #   Multiple factories for identifier 'jdbc' that implement 'CatalogFactory'
 # The core module also carries the 'connector' = 'jdbc' table factory.
+echo "==> PostgreSQL CDC: route_reference -> fluss.app.route_reference (Lab 3)..."
+download "flink-sql-connector-postgres-cdc-3.2.1.jar" \
+  "$MAVEN/org/apache/flink/flink-sql-connector-postgres-cdc/3.2.1/flink-sql-connector-postgres-cdc-3.2.1.jar"
+
 echo "==> Flink JDBC connector + PostgreSQL driver..."
 download "flink-connector-jdbc-core-${JDBC_CONNECTOR_VERSION}.jar" \
   "$MAVEN/org/apache/flink/flink-connector-jdbc-core/${JDBC_CONNECTOR_VERSION}/flink-connector-jdbc-core-${JDBC_CONNECTOR_VERSION}.jar"
