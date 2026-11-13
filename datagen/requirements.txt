@@ -1,0 +1,2 @@
+pyfluss==1.0.0
+pyarrow

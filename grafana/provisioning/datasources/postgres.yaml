@@ -1,0 +1,18 @@
+apiVersion: 1
+
+datasources:
+  - name: shipments_dwh
+    uid: shipments_dwh
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    database: shipments
+    user: root
+    secureJsonData:
+      password: admin1
+    jsonData:
+      sslmode: disable
+      database: shipments
+      postgresVersion: 1500
+      timescaledb: false
+    isDefault: true

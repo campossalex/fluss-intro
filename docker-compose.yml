@@ -1,0 +1,452 @@
+name: fluss-intro
+
+# Fluss Intro on open source: Apache Flink 1.20 + Apache Fluss 1.0, PostgreSQL and
+# Grafana, all in Docker Compose. The open-source edition of the Ververica Platform
+# fluss_intro lab: the same four labs, without the platform.
+#
+#   scan-gen (pyfluss) ─► fluss.app.scan_events_log ─► shipment-status ─► fluss.app.shipment_status
+#                                    │
+#                                    └─► scan-enrichment ◄─ fluss.app.route_reference (lookup join)
+#                                              │
+#                                   fluss.app.scans_enriched
+#                                              │  3 windowed jobs (TUMBLE 5 min)
+#                                              ▼
+#                              PostgreSQL `shipments` ─► Grafana
+#
+# Prerequisites:
+#   ./start.sh --services-only     (docker compose up -d and wait; see ./start.sh --help)
+#
+# Ports exposed to the host:
+#   80    — Environment homepage (links to everything below)
+#   8081  — Flink Web UI
+#   8083  — Flink SQL Gateway (REST)
+#   8084  — Web SQL editor + Pipeline Builder (Flink SQL in the browser)
+#   9123  — Fluss coordinator
+#   5432  — PostgreSQL `shipments` (the three Lab 4 sink tables)
+#   3000  — Grafana
+
+x-flink-image: &flink-image apache/flink:1.20-java17
+x-fluss-image: &fluss-image apache/fluss:1.0.0
+
+# Mounted at the same path everywhere Fluss data is read or written: Fluss offloads cold
+# log segments and KV snapshots here, and Flink's Fluss client reads them straight from
+# the filesystem. Deliberately NOT under /tmp/fluss — the client's scratch directory: a
+# Docker-created mount parent there is root:root 0755, and the uid-9999 Flink containers
+# could no longer download PK-table snapshots (every lookup join would fail).
+x-fluss-remote: &fluss-remote fluss-remote-data:/fluss/remote-data
+
+# The Fluss server configuration, shared by the coordinator and the tablet server.
+# Passed as FLUSS_PROPERTIES, which the image's entrypoint appends to conf/server.yaml.
+x-fluss-properties: &fluss-properties |
+  zookeeper.address: zookeeper:2181
+  default.replication.factor: 1
+  default.bucket.number: 3
+  remote.data.dir: /fluss/remote-data
+
+# Appended to config.yaml by the two containers that never run /docker-entrypoint.sh
+# (sql-client, sql-gateway), so FLINK_PROPERTIES would be ignored there. Without the
+# cluster address they fall back to rest.address 0.0.0.0 and submission fails with
+# "Connection refused: /0.0.0.0:8081".
+#
+# Checkpointing is set here on purpose: it is baked into the JobGraph by whoever submits
+# the job, and the Fluss sinks only commit on checkpoints.
+x-flink-client-conf: &flink-client-conf |
+  jobmanager.rpc.address: jobmanager
+  rest.address: jobmanager
+  rest.port: 8081
+  table.local-time-zone: UTC
+  table.catalog-store.kind: file
+  table.catalog-store.file.path: /opt/flink/catalog-store
+  execution.checkpointing.interval: 30s
+  state.backend.type: hashmap
+  state.checkpoints.dir: file:///tmp/flink-checkpoints
+  restart-strategy.type: exponential-delay
+  restart-strategy.exponential-delay.initial-backoff: 10s
+  restart-strategy.exponential-delay.max-backoff: 2min
+
+services:
+
+  # ── Fluss: ZooKeeper, coordinator, tablet server ─────────────────────────────
+
+  zookeeper:
+    image: zookeeper:3.9.1
+    hostname: zookeeper
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_SERVERS: "server.1=zookeeper:2888:3888;2181"
+    networks:
+      - fluss-net
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  coordinator-server:
+    image: *fluss-image
+    hostname: coordinator-server
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        export FLUSS_PROPERTIES="$$FLUSS_ROLE_PROPERTIES
+        $$FLUSS_COMMON_PROPERTIES"
+        exec /docker-entrypoint.sh coordinatorServer
+    environment:
+      TZ: UTC
+      FLUSS_COMMON_PROPERTIES: *fluss-properties
+      FLUSS_ROLE_PROPERTIES: |
+        bind.listeners: FLUSS://coordinator-server:9123
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      fluss-remote-init:
+        condition: service_completed_successfully
+    ports:
+      - "9123:9123"
+    volumes:
+      - *fluss-remote
+    networks:
+      - fluss-net
+    healthcheck:
+      # The server binds its advertised hostname, not localhost.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/coordinator-server/9123"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  tablet-server:
+    image: *fluss-image
+    hostname: tablet-server
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        export FLUSS_PROPERTIES="$$FLUSS_ROLE_PROPERTIES
+        $$FLUSS_COMMON_PROPERTIES"
+        exec /docker-entrypoint.sh tabletServer
+    environment:
+      TZ: UTC
+      FLUSS_COMMON_PROPERTIES: *fluss-properties
+      FLUSS_ROLE_PROPERTIES: |
+        bind.listeners: FLUSS://tablet-server:9123
+        tablet-server.id: 0
+        data.dir: /tmp/fluss/data
+    depends_on:
+      coordinator-server:
+        condition: service_healthy
+    volumes:
+      - *fluss-remote
+    networks:
+      - fluss-net
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/tablet-server/9123"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  # The volume is shared by the root-run Fluss servers and the uid-9999 Flink containers.
+  # A fresh named volume is root:root 0755; this opens it to both.
+  fluss-remote-init:
+    image: *fluss-image
+    user: root
+    entrypoint: ["/bin/sh", "-c", "chmod 1777 /fluss/remote-data && echo 'fluss remote dir ready.'"]
+    volumes:
+      - *fluss-remote
+    networks:
+      - fluss-net
+
+  # ── PostgreSQL: the analytics sink of Lab 4 ──────────────────────────────────
+
+  postgres:
+    image: postgres:15
+    hostname: postgres
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: admin1
+      POSTGRES_DB: shipments
+      TZ: UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/pg_shipments_ddl.sql:/docker-entrypoint-initdb.d/01_shipments.sql:ro
+    networks:
+      - fluss-net
+    healthcheck:
+      # -h forces TCP. Over the default unix socket this reports ready during initdb.
+      test: ["CMD-SHELL", "pg_isready -h postgres -U root -d shipments"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ── Flink session cluster ────────────────────────────────────────────────────
+  # lib/ is mounted from the host. The entrypoints copy the JARs into /opt/flink/lib/
+  # because the mount is read-only.
+  #
+  # The shell runs as root; docker-entrypoint.sh then drops the JVM to the `flink` user.
+  # A named volume's mountpoint is created root:root 0755, so without the chown the
+  # JobManager cannot create per-job checkpoint directories.
+
+  jobmanager:
+    image: *flink-image
+    hostname: jobmanager
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - "chown flink:flink /tmp/flink-checkpoints; cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true; /docker-entrypoint.sh jobmanager"
+    environment:
+      TZ: UTC
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        jobmanager.memory.process.size: 1200m
+        taskmanager.numberOfTaskSlots: 8
+        parallelism.default: 1
+        # scan_time is a naive datetime.now() from a TZ=UTC generator. Pinning the planner
+        # to UTC keeps it aligned with PROCTIME() and with Grafana.
+        table.local-time-zone: UTC
+        rest.port: 8081
+        rest.address: 0.0.0.0
+        state.backend.type: hashmap
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 30s
+        restart-strategy.type: exponential-delay
+        restart-strategy.exponential-delay.initial-backoff: 10s
+        restart-strategy.exponential-delay.max-backoff: 2min
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      # Checkpoint state is written by the TaskManager and its metadata by the JobManager,
+      # so file:// checkpointing only works if both see one filesystem.
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - *fluss-remote
+    networks:
+      - fluss-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://jobmanager:8081/overview"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # Eight slots: the five streaming jobs of the labs, plus room for the interactive
+  # queries an attendee leaves running in the SQL editor.
+  taskmanager:
+    image: *flink-image
+    hostname: taskmanager
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - "chown flink:flink /tmp/flink-checkpoints; cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true; /docker-entrypoint.sh taskmanager"
+    environment:
+      TZ: UTC
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 8
+        parallelism.default: 1
+        table.local-time-zone: UTC
+        taskmanager.memory.process.size: ${TM_PROCESS_SIZE:-2560m}
+        # HashMapStateBackend keeps all state on the task heap and never touches managed
+        # memory; the 0.4 default would park a third of the process there, unused.
+        taskmanager.memory.managed.fraction: 0.1
+        # Batch reads (COUNT(*) against Fluss) use the batch shuffle read buffer pool,
+        # which the 128m default leaves too small once the streaming jobs are running.
+        taskmanager.memory.framework.off-heap.size: 384m
+        state.backend.type: hashmap
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - *fluss-remote
+    networks:
+      - fluss-net
+    restart: unless-stopped
+
+  # A fresh named volume is root-owned, and the Flink image runs as uid 9999 (flink).
+  # Without this one-shot chown, the first CREATE CATALOG dies with
+  #   java.io.FileNotFoundException: /opt/flink/catalog-store/fluss.yaml (Permission denied)
+  catalog-store-init:
+    image: *flink-image
+    user: root
+    entrypoint: ["/bin/sh", "-c", "chown 9999:9999 /opt/flink/catalog-store && echo 'catalog store ready.'"]
+    volumes:
+      - catalog-store:/opt/flink/catalog-store
+    networks:
+      - fluss-net
+
+  # The SQL client container. It idles so we can `docker compose exec` into it, and
+  # appends FLINK_CLIENT_CONF to its config.yaml (see x-flink-client-conf above).
+  sql-client:
+    image: *flink-image
+    hostname: sql-client
+    environment:
+      TZ: UTC
+      FLINK_CLIENT_CONF: *flink-client-conf
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true
+        grep -q '^rest.address: jobmanager' /opt/flink/conf/config.yaml || \
+          printf '\n%s\n' "$$FLINK_CLIENT_CONF" >> /opt/flink/conf/config.yaml
+        sleep infinity
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      catalog-store-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - ./flink_sql:/opt/sql:ro
+      - ./scripts/submit.sh:/opt/submit.sh:ro
+      # CatalogStore: persists CATALOG REGISTRATIONS (CREATE CATALOG fluss / shipments_pg),
+      # shared with sql-gateway, so a catalog created in the editor is visible here too.
+      # The tables themselves live in Fluss and PostgreSQL.
+      - catalog-store:/opt/flink/catalog-store
+      - *fluss-remote
+    networks:
+      - fluss-net
+
+  # ── Web SQL editor ───────────────────────────────────────────────────────────
+  # The SQL Gateway is the SQL engine the SQL client embeds, exposed as a REST API. It has
+  # no UI and sends no CORS headers, so the browser talks to sql-editor, which proxies it.
+  # idle-timeout=0: sessions never expire, so a coffee break loses nothing.
+  sql-gateway:
+    image: *flink-image
+    hostname: sql-gateway
+    environment:
+      TZ: UTC
+      FLINK_CLIENT_CONF: *flink-client-conf
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true
+        grep -q '^rest.address: jobmanager' /opt/flink/conf/config.yaml || \
+          printf '\n%s\n' "$$FLINK_CLIENT_CONF" >> /opt/flink/conf/config.yaml
+        exec /opt/flink/bin/sql-gateway.sh start-foreground \
+          -Dsql-gateway.endpoint.rest.address=0.0.0.0 \
+          -Dsql-gateway.endpoint.rest.port=8083 \
+          -Dsql-gateway.session.idle-timeout=0 \
+          -Dexecution.target=remote
+    ports:
+      - "8083:8083"
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      catalog-store-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - catalog-store:/opt/flink/catalog-store
+      - *fluss-remote
+    networks:
+      - fluss-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/v1/info"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  # The SQL editor (/) and the Pipeline Builder (/pipeline). The browser keeps one gateway
+  # session and reconnects to it after a reload. The examples menu and every Pipeline
+  # Builder action are cut from flink_sql/, so those files stay the one source of SQL.
+  sql-editor:
+    image: python:3.11-slim
+    hostname: sql-editor
+    environment:
+      TZ: UTC
+      GATEWAY_URL: http://sql-gateway:8083
+      FLINK_URL: http://jobmanager:8081
+      PRELOAD_DDL: "${PRELOAD_DDL:-false}"
+    depends_on:
+      sql-gateway:
+        condition: service_healthy
+    volumes:
+      - ./sql-editor:/app:ro
+      - ./flink_sql:/opt/sql:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install -r requirements.txt -q && python3 app.py"
+    ports:
+      - "8084:8084"
+    networks:
+      - fluss-net
+    restart: on-failure
+
+  # ── Environment homepage ─────────────────────────────────────────────────────
+  # One static page on port 80 with a card per web UI — each link built from the host
+  # the page was opened on — plus the connection details.
+  homepage:
+    image: nginx:1.27-alpine
+    hostname: homepage
+    volumes:
+      - ./homepage:/usr/share/nginx/html:ro
+    ports:
+      - "80:80"
+    networks:
+      - fluss-net
+    restart: unless-stopped
+
+  # ── Shipment scan generator ──────────────────────────────────────────────────
+  # Writes straight into fluss.app.scan_events_log with the Fluss Python client — no
+  # Kafka, no ingestion job. Until Lab 1, Step 2 creates that table it logs
+  # "[WAIT] Fluss table not yet available" every 5 seconds.
+  scan-gen:
+    image: python:3.11-slim
+    hostname: scan-gen
+    environment:
+      # Pin UTC: scan_time is a naive datetime.now(), so the container's zone silently
+      # defines what it means.
+      TZ: UTC
+      PYTHONUNBUFFERED: "1"
+      FLUSS_BOOTSTRAP_SERVERS: coordinator-server:9123
+    depends_on:
+      tablet-server:
+        condition: service_healthy
+    volumes:
+      - ./datagen:/app:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install -r requirements.txt -q --root-user-action=ignore && python3 scan_events.py"
+    networks:
+      - fluss-net
+    restart: on-failure
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  # Datasource and dashboard are provisioned, so there is nothing to import by hand.
+  grafana:
+    image: grafana/grafana:11.3.0
+    hostname: grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/shipment_tracking.json
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - fluss-net
+
+networks:
+  fluss-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  flink-checkpoints:
+  catalog-store:
+  fluss-remote-data:
